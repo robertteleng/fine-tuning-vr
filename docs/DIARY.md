@@ -30,11 +30,23 @@ Fine-tuning de YOLO para detectar cajas con patrón tablero amarillo-negro en VR
 
 ## Hitos
 
-### Hito 1: [PENDIENTE] auto_annotate.py
-- **Estado:** En progreso
+### Hito 1: [COMPLETADO] auto_annotate.py
+- **Estado:** Completado ✓
 - **Descripción:** Script de auto-anotación con template matching multi-escala y NMS
+- **Funciones implementadas:**
+  - `cargar_template()` - Carga template en escala de grises
+  - `match_template_multiscale()` - Búsqueda a 20 escalas (0.3x - 2.0x)
+  - `nms()` - Non-Maximum Suppression para eliminar duplicados
+  - `a_formato_yolo()` - Conversión a formato YOLO normalizado
+  - `procesar_imagen()` - Pipeline completo de detección
 - **Testing:**
-- **Commit:**
+  - Template: 280x544 px
+  - Imágenes procesadas: 694
+  - Total detecciones: 2102
+  - Promedio por imagen: 3.0 detecciones
+  - Velocidad: ~3.4 img/s
+  - Labels generados correctamente en formato YOLO
+- **Commit:** feat: añadir script de auto-anotación con template matching
 
 ---
 
