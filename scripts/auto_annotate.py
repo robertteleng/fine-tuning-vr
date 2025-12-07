@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
 Auto-anotación de imágenes usando template matching.
-
-Uso:
-    python scripts/auto_annotate.py --frames data/frames --template data/template.jpg --output data/labels
 """
 
 import cv2
@@ -11,300 +8,174 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-
-# =============================================================================
-# PASO 1: Cargar template
-# =============================================================================
-def cargar_template(template_path: str) -> np.ndarray:
-    """
-    Carga la imagen del template en escala de grises.
-
-    Args:
-        template_path: Ruta a la imagen del template
-
-    Returns:
-        Template en escala de grises
-    """
+def load_template(template_path: str) -> np.ndarray:
+    """Load template image in grayscale."""
     template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
     if template is None:
-        raise FileNotFoundError(f"No se pudo cargar el template: {template_path}")
+        raise FileNotFoundError(f"Could not load template: {template_path}")
     return template
 
+def match_template_multiscale(image, template, scales=None, threshold=0.65):
+    """Search for template in image at different scales."""
+    if scales is None:
+        scales = np.linspace(0.3, 2.0, 20)  # 20 scales from 30% to 200%
 
-# =============================================================================
-# PASO 2: Template matching a múltiples escalas
-# =============================================================================
-def match_template_multiscale(
-    imagen: np.ndarray,
-    template: np.ndarray,
-    escalas: list = None,
-    umbral: float = 0.65
-) -> list:
-    """
-    Busca el template en la imagen a diferentes escalas.
-
-    ¿Por qué múltiples escalas?
-    - La caja puede estar cerca (grande) o lejos (pequeña)
-    - El template tiene un tamaño fijo
-    - Probamos redimensionar el template para encontrar coincidencias
-
-    Args:
-        imagen: Imagen donde buscar (escala de grises)
-        template: Template a buscar (escala de grises)
-        escalas: Lista de factores de escala (ej: [0.5, 1.0, 1.5])
-        umbral: Mínima correlación para considerar una detección (0-1)
-
-    Returns:
-        Lista de detecciones: [{'x', 'y', 'w', 'h', 'conf'}, ...]
-    """
-    if escalas is None:
-        # Escalas desde 0.3x hasta 2.0x del template original
-        escalas = np.linspace(0.3, 2.0, 20)
-
-    detecciones = []
+    detections = []
     h_template, w_template = template.shape[:2]
 
-    for escala in escalas:
-        # Redimensionar template
-        nuevo_w = int(w_template * escala)
-        nuevo_h = int(h_template * escala)
-
-        # Evitar templates más grandes que la imagen
-        if nuevo_w >= imagen.shape[1] or nuevo_h >= imagen.shape[0]:
+    for scale in scales:
+        # Resize template
+        new_w = int(w_template * scale)
+        new_h = int(h_template * scale)
+        
+        # Skip if too large or too small
+        if new_w >= image.shape[1] or new_h >= image.shape[0]:
             continue
-
-        # Evitar templates muy pequeños
-        if nuevo_w < 10 or nuevo_h < 10:
+        if new_w < 10 or new_h < 10:
             continue
-
-        template_escalado = cv2.resize(template, (nuevo_w, nuevo_h))
-
+        
+        scaled_template = cv2.resize(template, (new_w, new_h))
+        
         # Template matching
-        # TM_CCOEFF_NORMED: correlación normalizada, valores entre -1 y 1
-        resultado = cv2.matchTemplate(imagen, template_escalado, cv2.TM_CCOEFF_NORMED)
-
-        # Encontrar todas las ubicaciones por encima del umbral
-        ubicaciones = np.where(resultado >= umbral)
-
-        for (y, x) in zip(*ubicaciones):
-            detecciones.append({
-                'x': x,
-                'y': y,
-                'w': nuevo_w,
-                'h': nuevo_h,
-                'conf': resultado[y, x]
+        result = cv2.matchTemplate(image, scaled_template, cv2.TM_CCOEFF_NORMED)
+        
+        # Save where there is a match
+        locations = np.where(result >= threshold)
+        for (y, x) in zip(*locations):
+            detections.append({
+                'x': x, 'y': y,
+                'w': new_w, 'h': new_h,
+                'conf': result[y, x]
             })
 
-    return detecciones
+    return detections
 
-
-# =============================================================================
-# PASO 3: Non-Maximum Suppression (NMS)
-# =============================================================================
-def nms(detecciones: list, iou_umbral: float = 0.3) -> list:
-    """
-    Elimina detecciones duplicadas usando Non-Maximum Suppression.
-
-    ¿Por qué NMS?
-    - El template matching encuentra la misma caja muchas veces
-    - A diferentes escalas y posiciones ligeramente distintas
-    - NMS mantiene solo la mejor detección de cada grupo
-
-    Algoritmo:
-    1. Ordenar por confianza (mayor primero)
-    2. Tomar la mejor, eliminar las que se solapan mucho con ella
-    3. Repetir hasta procesar todas
-
-    Args:
-        detecciones: Lista de detecciones
-        iou_umbral: Máximo solapamiento permitido (0-1)
-
-    Returns:
-        Lista filtrada de detecciones
-    """
-    if len(detecciones) == 0:
+def nms(detections, iou_threshold=0.3):
+    """Remove duplicate detections using Non-Maximum Suppression."""
+    if len(detections) == 0:
         return []
-
-    # Convertir a arrays para operaciones vectorizadas
-    boxes = np.array([[d['x'], d['y'], d['x'] + d['w'], d['y'] + d['h']]
-                      for d in detecciones])
-    scores = np.array([d['conf'] for d in detecciones])
-
-    # Coordenadas de las cajas
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-
-    # Área de cada caja
+    
+    # Convert to arrays
+    boxes = np.array([[d['x'], d['y'], d['x'] + d['w'], d['y'] + d['h']] 
+                      for d in detections])
+    scores = np.array([d['conf'] for d in detections])
+    
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
     areas = (x2 - x1) * (y2 - y1)
-
-    # Ordenar por confianza (índices de mayor a menor)
-    orden = scores.argsort()[::-1]
-
-    mantener = []
-
-    while len(orden) > 0:
-        # Tomar el índice con mayor confianza
-        i = orden[0]
-        mantener.append(i)
-
-        # Calcular IoU con el resto
-        xx1 = np.maximum(x1[i], x1[orden[1:]])
-        yy1 = np.maximum(y1[i], y1[orden[1:]])
-        xx2 = np.minimum(x2[i], x2[orden[1:]])
-        yy2 = np.minimum(y2[i], y2[orden[1:]])
-
-        # Área de intersección
+    
+    # Sort by confidence (highest first)
+    order = scores.argsort()[::-1]
+    
+    keep = []
+    while len(order) > 0:
+        i = order[0]
+        keep.append(i)
+        
+        # Calculate IoU with remaining boxes
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        
         w = np.maximum(0, xx2 - xx1)
         h = np.maximum(0, yy2 - yy1)
-        interseccion = w * h
+        intersection = w * h
+        
+        iou = intersection / (areas[i] + areas[order[1:]] - intersection)
+        
+        # Keep boxes with IoU below threshold
+        remaining = np.where(iou <= iou_threshold)[0]
+        order = order[remaining + 1]
+    
+    return [detections[i] for i in keep]
 
-        # IoU = intersección / unión
-        iou = interseccion / (areas[i] + areas[orden[1:]] - interseccion)
+def to_yolo_format(detections, img_width, img_height, class_id=0):
+    """Convert detections to YOLO format (normalized)."""
+    lines = []
+    
+    for det in detections:
+        # Calculate center
+        x_center = (det['x'] + det['w'] / 2) / img_width
+        y_center = (det['y'] + det['h'] / 2) / img_height
+        
+        # Normalize dimensions
+        width = det['w'] / img_width
+        height = det['h'] / img_height
+        
+        # Format: class x_center y_center width height
+        line = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+        lines.append(line)
+    
+    return lines
 
-        # Mantener solo las cajas con IoU menor al umbral
-        indices_mantener = np.where(iou <= iou_umbral)[0]
-        orden = orden[indices_mantener + 1]
-
-    return [detecciones[i] for i in mantener]
-
-
-# =============================================================================
-# PASO 4: Convertir a formato YOLO
-# =============================================================================
-def a_formato_yolo(detecciones: list, ancho_img: int, alto_img: int, clase: int = 0) -> list:
-    """
-    Convierte detecciones a formato YOLO normalizado.
-
-    Formato YOLO: clase x_centro y_centro ancho alto
-    - Todos los valores normalizados entre 0 y 1
-    - x_centro, y_centro: centro de la caja
-    - ancho, alto: tamaño de la caja
-
-    Args:
-        detecciones: Lista de detecciones con x, y, w, h en píxeles
-        ancho_img: Ancho de la imagen en píxeles
-        alto_img: Alto de la imagen en píxeles
-        clase: Índice de la clase (default 0)
-
-    Returns:
-        Lista de strings en formato YOLO
-    """
-    lineas = []
-
-    for det in detecciones:
-        # Calcular centro
-        x_centro = (det['x'] + det['w'] / 2) / ancho_img
-        y_centro = (det['y'] + det['h'] / 2) / alto_img
-
-        # Normalizar dimensiones
-        ancho = det['w'] / ancho_img
-        alto = det['h'] / alto_img
-
-        # Formato: clase x_centro y_centro ancho alto
-        linea = f"{clase} {x_centro:.6f} {y_centro:.6f} {ancho:.6f} {alto:.6f}"
-        lineas.append(linea)
-
-    return lineas
-
-
-# =============================================================================
-# PASO 5: Procesar una imagen
-# =============================================================================
-def procesar_imagen(
-    imagen_path: str,
-    template: np.ndarray,
-    umbral: float = 0.65,
-    iou_umbral: float = 0.3
-) -> list:
-    """
-    Procesa una imagen completa: detecta y filtra.
-
-    Args:
-        imagen_path: Ruta a la imagen
-        template: Template en escala de grises
-        umbral: Umbral de detección
-        iou_umbral: Umbral de NMS
-
-    Returns:
-        Lista de líneas en formato YOLO
-    """
-    # Cargar imagen en escala de grises
-    imagen = cv2.imread(imagen_path, cv2.IMREAD_GRAYSCALE)
-    if imagen is None:
-        print(f"  Error: No se pudo cargar {imagen_path}")
+def process_image(image_path, template, threshold=0.65, iou_threshold=0.3):
+    """Process a single image: detect and filter."""
+    # Load image in grayscale
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        print(f"  Error: Could not load {image_path}")
         return []
+    
+    height, width = image.shape[:2]
+    
+    # Detect
+    detections = match_template_multiscale(image, template, threshold=threshold)
+    
+    # Filter duplicates
+    filtered = nms(detections, iou_threshold=iou_threshold)
+    
+    # Convert to YOLO
+    yolo_lines = to_yolo_format(filtered, width, height)
+    
+    return yolo_lines
 
-    alto, ancho = imagen.shape[:2]
 
-    # Detectar
-    detecciones = match_template_multiscale(imagen, template, umbral=umbral)
-
-    # Filtrar duplicados
-    detecciones_filtradas = nms(detecciones, iou_umbral=iou_umbral)
-
-    # Convertir a YOLO
-    lineas_yolo = a_formato_yolo(detecciones_filtradas, ancho, alto)
-
-    return lineas_yolo
-
-
-# =============================================================================
-# PASO 6: Main
-# =============================================================================
 def main():
     import argparse
-
-    parser = argparse.ArgumentParser(description='Auto-anotación con template matching')
-    parser.add_argument('--frames', type=str, required=True, help='Carpeta con imágenes')
-    parser.add_argument('--template', type=str, required=True, help='Imagen del template')
-    parser.add_argument('--output', type=str, required=True, help='Carpeta de salida para labels')
-    parser.add_argument('--umbral', type=float, default=0.65, help='Umbral de detección (0-1)')
-    parser.add_argument('--iou', type=float, default=0.3, help='Umbral IoU para NMS (0-1)')
-
+    
+    parser = argparse.ArgumentParser(description='Auto-annotation with template matching')
+    parser.add_argument('--frames', type=str, required=True, help='Folder with images')
+    parser.add_argument('--template', type=str, required=True, help='Template image')
+    parser.add_argument('--output', type=str, required=True, help='Output folder for labels')
+    parser.add_argument('--threshold', type=float, default=0.65, help='Detection threshold (0-1)')
+    parser.add_argument('--iou', type=float, default=0.3, help='NMS IoU threshold (0-1)')
+    
     args = parser.parse_args()
-
-    # Crear carpeta de salida
+    
+    # Create output folder
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Cargar template
-    print(f"Cargando template: {args.template}")
-    template = cargar_template(args.template)
-    print(f"  Tamaño: {template.shape[1]}x{template.shape[0]} px")
-
-    # Buscar imágenes
+    
+    # Load template
+    print(f"Loading template: {args.template}")
+    template = load_template(args.template)
+    print(f"  Size: {template.shape[1]}x{template.shape[0]} px")
+    
+    # Find images
     frames_dir = Path(args.frames)
-    extensiones = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
-    imagenes = []
-    for ext in extensiones:
-        imagenes.extend(frames_dir.glob(ext))
-    imagenes = sorted(imagenes)
-
-    print(f"Imágenes encontradas: {len(imagenes)}")
-
-    # Procesar cada imagen
-    total_detecciones = 0
-
-    for img_path in tqdm(imagenes, desc="Procesando"):
-        lineas = procesar_imagen(str(img_path), template, args.umbral, args.iou)
-
-        # Guardar archivo .txt
+    images = sorted(list(frames_dir.glob('*.jpg')) + list(frames_dir.glob('*.png')))
+    print(f"Images found: {len(images)}")
+    
+    # Process each image
+    total_detections = 0
+    for img_path in tqdm(images, desc="Processing"):
+        lines = process_image(str(img_path), template, args.threshold, args.iou)
+        
+        # Save .txt file
         label_path = output_dir / f"{img_path.stem}.txt"
         with open(label_path, 'w') as f:
-            f.write('\n'.join(lineas))
-
-        total_detecciones += len(lineas)
-
-    # Resumen
+            f.write('\n'.join(lines))
+        
+        total_detections += len(lines)
+    
+    # Summary
     print(f"\n{'='*50}")
-    print(f"RESUMEN")
+    print(f"SUMMARY")
     print(f"{'='*50}")
-    print(f"Imágenes procesadas: {len(imagenes)}")
-    print(f"Total detecciones: {total_detecciones}")
-    print(f"Promedio por imagen: {total_detecciones/max(len(imagenes),1):.1f}")
-    print(f"Labels guardados en: {output_dir}")
+    print(f"Images processed: {len(images)}")
+    print(f"Total detections: {total_detections}")
+    print(f"Average per image: {total_detections/max(len(images),1):.1f}")
+    print(f"Labels saved to: {output_dir}")
 
 
 if __name__ == '__main__':
